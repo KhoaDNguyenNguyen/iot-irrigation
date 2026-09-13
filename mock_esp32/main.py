@@ -1,7 +1,10 @@
+import os
 import time
 import json
 import random
 import paho.mqtt.client as mqtt
+
+MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
 
 mode = "AUTO"
 pump_state = "IDLE"
@@ -27,7 +30,7 @@ def on_message(client, userdata, msg):
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 client.on_message = on_message
-client.connect("localhost", 1883, 60)
+client.connect(MQTT_BROKER, 1883, 60)
 client.subscribe("farm/zone1/command")
 client.loop_start()
 
@@ -66,6 +69,7 @@ while True:
         "temperature": round(random.uniform(22.0, 26.0), 1),
         "water_level": round(water_level, 1),
         "pump_state": pump_state,
+        "soak_time_left": max(0, soak_timer),
         "rtt_ms": random.randint(15, 60),
         "mode": mode,
         "history": history,
