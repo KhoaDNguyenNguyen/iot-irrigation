@@ -10,8 +10,33 @@ services:
 
   mosquitto:
     image: eclipse-mosquitto:latest
-    volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
     ports:
       - "1883:1883"
       - "9001:9001"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - mosquitto
+    environment:
+      - DB_URL=postgresql://admin:admin@postgres:5432/iot
+      - MQTT_BROKER=mosquitto
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+  mock_esp32:
+    build: ./mock_esp32
+    depends_on:
+      - mosquitto
+    environment:
+      - MQTT_BROKER=mosquitto
