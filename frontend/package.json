@@ -16,12 +16,15 @@
     "mqtt": "^5.15.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "recharts": "^3.10.1"
+    "recharts": "^3.10.1",
+    "uuid": "^14.0.2",
+    "zod": "^4.6.4"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
+    "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^6.1.1",
     "autoprefixer": "^10.6.0",
     "oxlint": "^1.81.0",
