@@ -1,0 +1,6 @@
+user backend
+topic #
+
+user esp32
+topic read farm/zone1/command
+topic write farm/zone1/telemetry

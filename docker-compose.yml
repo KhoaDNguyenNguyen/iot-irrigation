@@ -9,12 +9,9 @@ services:
       - "5432:5432"
 
   mosquitto:
-    image: eclipse-mosquitto:latest
+    build: ./mosquitto
     ports:
       - "1883:1883"
-      - "9001:9001"
-    volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
 
   backend:
     build: ./backend
