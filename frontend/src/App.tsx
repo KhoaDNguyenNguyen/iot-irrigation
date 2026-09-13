@@ -1,8 +1,5 @@
 import { useEffect, useState } from 'react'
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
-import { Droplets, Thermometer, Database, Power, Sprout, Sun, Moon, Languages, Activity, Wifi, Droplet, Battery, SignalHigh, Clock } from 'lucide-react'
-import axios from 'axios'
-import { AreaChart, Area, Tooltip, ResponsiveContainer } from 'recharts'
+import { Droplets, Thermometer, Database, Power, Sprout, Sun, Moon, Languages, Activity, Droplet, Battery, SignalHigh, Clock } from 'lucide-react'
 
 type Lang = 'en' | 'vi'
 
@@ -51,14 +48,13 @@ const i18n: Record<Lang, Record<string, string>> = {
   }
 }
 
-const queryClient = new QueryClient()
-
-function Dashboard() {
+export default function App() {
   const [data, setData] = useState({ 
     soil_moisture: 0, 
     temperature: 0, 
     water_level: 0,
     pump_state: 'IDLE',
+    soak_time_left: 0,
     rtt_ms: 0,
     mode: 'AUTO',
     history: [] as number[],
@@ -72,32 +68,47 @@ function Dashboard() {
   const [isManual, setIsManual] = useState(false)
 
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8000/ws')
-    ws.onopen = () => setWsStatus('ONLINE')
-    ws.onclose = () => setWsStatus('OFFLINE')
-    ws.onmessage = (e) => setData(JSON.parse(e.data))
-    return () => ws.close()
+    let timeoutId: ReturnType<typeof setTimeout>
+    let ws: WebSocket
+    let retryCount = 0
+
+    const connect = () => {
+      ws = new WebSocket('ws://localhost:8000/ws')
+      
+      ws.onopen = () => {
+        setWsStatus('ONLINE')
+        retryCount = 0
+      }
+      
+      ws.onclose = () => {
+        setWsStatus('OFFLINE')
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 8000)
+        retryCount++
+        timeoutId = setTimeout(connect, delay)
+      }
+      
+      ws.onmessage = (e) => {
+        setData(JSON.parse(e.data))
+      }
+    }
+
+    connect()
+
+    return () => {
+      clearTimeout(timeoutId)
+      if (ws) {
+        ws.onclose = null
+        ws.close()
+      }
+    }
   }, [])
 
-  const { data: historyData } = useQuery({
-    queryKey: ['history'],
-    queryFn: async () => {
-      try {
-        const res = await axios.get('http://localhost:8000/api/telemetry/history?minutes=60')
-        return res.data.map((d: any) => ({
-          time: new Date(d.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          moisture: d.moisture,
-          temp: d.temp
-        }))
-      } catch {
-        return []
-      }
-    },
-    refetchInterval: 5000
-  })
-
   const sendCommand = async (action: string, mode: string) => {
-    await axios.post('http://localhost:8000/api/command', { action, mode })
+    await fetch('http://localhost:8000/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, mode })
+    })
   }
 
   const formatUptime = (seconds: number) => {
@@ -237,17 +248,22 @@ function Dashboard() {
               <div className="flex flex-col sm:flex-row items-center gap-6">
                 
                 <div className="flex gap-2 text-[11px] font-bold">
-                  {['IDLE', 'PUMPING', 'SOAKING'].map(state => (
-                    <div key={state} className={`px-4 py-2 rounded-lg border transition-all ${
-                      data.pump_state === state 
-                        ? (state === 'PUMPING' 
-                            ? 'bg-blue-500 text-white border-blue-500 shadow-sm' 
-                            : 'bg-slate-800 text-white border-slate-800 dark:bg-zinc-100 dark:text-zinc-900 dark:border-zinc-100')
-                        : 'bg-slate-50 text-slate-400 border-slate-200 dark:bg-zinc-950 dark:text-zinc-600 dark:border-zinc-800/50'
-                    }`}>
-                      {state === 'IDLE' ? t.idle : state === 'PUMPING' ? t.pumping : t.soaking}
-                    </div>
-                  ))}
+                  {['IDLE', 'PUMPING', 'SOAKING'].map(state => {
+                    const isActive = data.pump_state === state;
+                    const textDisplay = state === 'IDLE' ? t.idle : state === 'PUMPING' ? t.pumping : (isActive ? `${t.soaking} (${data.soak_time_left}s)` : t.soaking);
+                    
+                    return (
+                      <div key={state} className={`px-4 py-2 rounded-lg border transition-all ${
+                        isActive 
+                          ? (state === 'PUMPING' 
+                              ? 'bg-blue-500 text-white border-blue-500 shadow-sm' 
+                              : 'bg-slate-800 text-white border-slate-800 dark:bg-zinc-100 dark:text-zinc-900 dark:border-zinc-100')
+                          : 'bg-slate-50 text-slate-400 border-slate-200 dark:bg-zinc-950 dark:text-zinc-600 dark:border-zinc-800/50'
+                      }`}>
+                        {textDisplay}
+                      </div>
+                    )
+                  })}
                 </div>
 
                 <div className="h-6 w-px bg-slate-200 dark:bg-zinc-800 hidden md:block" />
@@ -343,13 +359,5 @@ function Dashboard() {
         </div>
       </div>
     </div>
-  )
-}
-
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <Dashboard />
-    </QueryClientProvider>
   )
 }
