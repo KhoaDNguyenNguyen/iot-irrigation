@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -8,7 +9,8 @@ from pydantic import BaseModel
 import paho.mqtt.client as mqtt
 import asyncpg
 
-DB_URL = "postgresql://admin:admin@localhost:5432/iot"
+DB_URL = os.getenv("DB_URL", "postgresql://admin:admin@localhost:5432/iot")
+MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
 
 class ConnectionManager:
     def __init__(self):
@@ -36,19 +38,24 @@ mqtt_client = None
 
 async def init_db():
     global db_pool
-    db_pool = await asyncpg.create_pool(DB_URL)
-    async with db_pool.acquire() as conn:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS telemetry (
-                ts TIMESTAMPTZ NOT NULL,
-                temperature DOUBLE PRECISION,
-                soil_moisture DOUBLE PRECISION,
-                water_level DOUBLE PRECISION,
-                pump_state VARCHAR(20)
-            );
-        """)
-        await conn.execute("SELECT create_hypertable('telemetry', 'ts', if_not_exists => TRUE);")
+    for _ in range(5):
+        try:
+            db_pool = await asyncpg.create_pool(DB_URL)
+            async with db_pool.acquire() as conn:
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS telemetry (
+                        ts TIMESTAMPTZ NOT NULL,
+                        temperature DOUBLE PRECISION,
+                        soil_moisture DOUBLE PRECISION,
+                        water_level DOUBLE PRECISION,
+                        pump_state VARCHAR(20)
+                    );
+                """)
+                await conn.execute("SELECT create_hypertable('telemetry', 'ts', if_not_exists => TRUE);")
+            break
+        except Exception:
+            await asyncio.sleep(2)
 
 async def insert_telemetry(payload: dict):
     if not db_pool:
@@ -83,7 +90,14 @@ async def lifespan(app: FastAPI):
     await init_db()
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     mqtt_client.on_message = on_message
-    mqtt_client.connect("localhost", 1883, 60)
+    
+    for _ in range(5):
+        try:
+            mqtt_client.connect(MQTT_BROKER, 1883, 60)
+            break
+        except Exception:
+            await asyncio.sleep(2)
+            
     mqtt_client.subscribe("farm/zone1/telemetry")
     mqtt_client.loop_start()
     yield
@@ -107,7 +121,7 @@ class CommandRequest(BaseModel):
 @app.get("/api/telemetry/history", response_model=list[TelemetryHistory])
 async def get_history(minutes: int = 60):
     if not db_pool:
-        raise HTTPException(status_code=503, detail="Database not initialized")
+        return []
     
     query = """
         SELECT
