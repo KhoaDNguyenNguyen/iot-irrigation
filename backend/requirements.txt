@@ -4,3 +4,4 @@ paho-mqtt
 websockets
 asyncpg
 pydantic
+pyjwt
