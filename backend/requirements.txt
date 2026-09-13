@@ -2,3 +2,5 @@ fastapi
 uvicorn
 paho-mqtt
 websockets
+asyncpg
+pydantic
