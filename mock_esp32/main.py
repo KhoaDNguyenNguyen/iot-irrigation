@@ -4,7 +4,7 @@ import json
 import random
 import paho.mqtt.client as mqtt
 
-MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
+MQTT_BROKER = os.getenv("MQTT_BROKER", "mosquitto")
 
 mode = "AUTO"
 pump_state = "IDLE"
@@ -13,11 +13,31 @@ water_level = 81.0
 soak_timer = 0
 history = [38.0] * 20
 uptime = 0
+processed_commands = []
+
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        client.subscribe("farm/zone1/command")
 
 def on_message(client, userdata, msg):
-    global mode, pump_state
+    global mode, pump_state, processed_commands
     try:
         payload = json.loads(msg.payload.decode())
+        
+        cmd_id = payload.get("command_id")
+        ts = payload.get("timestamp", 0)
+        
+        if not cmd_id or cmd_id in processed_commands:
+            return
+            
+        current_ts = int(time.time())
+        if abs(current_ts - ts) > 30:
+            return
+            
+        processed_commands.append(cmd_id)
+        if len(processed_commands) > 50:
+            processed_commands.pop(0)
+
         if "mode" in payload:
             mode = payload["mode"]
         if "action" in payload and mode == "MANUAL":
@@ -29,14 +49,21 @@ def on_message(client, userdata, msg):
         pass
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client.username_pw_set("esp32", "esp32pass")
+client.on_connect = on_connect
 client.on_message = on_message
-client.connect(MQTT_BROKER, 1883, 60)
-client.subscribe("farm/zone1/command")
+
+while True:
+    try:
+        client.connect(MQTT_BROKER, 1883, 60)
+        break
+    except Exception:
+        time.sleep(3)
+
 client.loop_start()
 
 while True:
     uptime += 1
-    
     if mode == "AUTO":
         if pump_state == "IDLE" and moisture < 40.0 and water_level > 5.0:
             pump_state = "PUMPING"
