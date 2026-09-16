@@ -5,15 +5,28 @@ import time
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response, Depends
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import jwt
 import paho.mqtt.client as mqtt
 import asyncpg
+import bcrypt
+import httpx
 
-DB_URL = os.getenv("DB_URL", "postgresql://admin:admin@postgres:5432/iot")
-MQTT_BROKER = os.getenv("MQTT_BROKER", "mosquitto")
-JWT_SECRET = "production_secret_key_123"
+DB_URL = os.getenv("DB_URL", "postgresql://admin:admin@localhost:5432/iot")
+MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
+JWT_SECRET = os.getenv("JWT_SECRET", "super-secret-key-change-me")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = "http://localhost:8000/api/auth/google/callback"
+FRONTEND_URL = "http://localhost:5173"
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
 class ConnectionManager:
     def __init__(self):
@@ -46,6 +59,21 @@ async def init_db():
             db_pool = await asyncpg.create_pool(DB_URL)
             async with db_pool.acquire() as conn:
                 await conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
+                
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        username VARCHAR(255) PRIMARY KEY,
+                        password_hash VARCHAR(255),
+                        role VARCHAR(50) DEFAULT 'viewer'
+                    );
+                """)
+                
+                await conn.execute("""
+                    INSERT INTO users (username, password_hash, role) 
+                    VALUES ($1, $2, 'operator'), ($3, $4, 'viewer')
+                    ON CONFLICT (username) DO NOTHING;
+                """, 'operator', hash_password('admin123'), 'viewer', hash_password('view123'))
+
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS telemetry (
                         ts TIMESTAMPTZ NOT NULL,
@@ -117,7 +145,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost"],
+    allow_origins=["http://localhost:5173", "http://localhost", "http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -138,12 +166,13 @@ class LoginData(BaseModel):
 
 @app.post("/api/auth/login")
 async def login(data: LoginData, response: Response):
-    users = {
-        "operator": {"pass": "admin123", "role": "operator"},
-        "viewer": {"pass": "view123", "role": "viewer"}
-    }
-    user = users.get(data.username)
-    if not user or user["pass"] != data.password:
+    if not db_pool:
+        raise HTTPException(status_code=500)
+        
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT password_hash, role FROM users WHERE username = $1", data.username)
+        
+    if not user or not user["password_hash"] or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401)
     
     token = jwt.encode(
@@ -151,8 +180,55 @@ async def login(data: LoginData, response: Response):
         JWT_SECRET,
         algorithm="HS256"
     )
-    response.set_cookie(key="auth_token", value=token, httponly=True, samesite="lax", max_age=28800)
+    response.set_cookie(key="auth_token", value=token, httponly=True, samesite="strict", secure=False, max_age=28800)
     return {"role": user["role"]}
+
+@app.get("/api/auth/google/login")
+async def google_login():
+    url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={GOOGLE_CLIENT_ID}&redirect_uri={GOOGLE_REDIRECT_URI}&scope=openid%20email%20profile"
+    return RedirectResponse(url)
+
+@app.get("/api/auth/google/callback")
+async def google_callback(code: str, response: Response):
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "code": code,
+                "grant_type": "authorization_code",
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+            },
+        )
+        token_data = token_res.json()
+        user_res = await client.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {token_data.get('access_token')}"},
+        )
+        user_data = user_res.json()
+    
+    email = user_data.get("email")
+    if not email or not db_pool:
+        raise HTTPException(status_code=400)
+
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT role FROM users WHERE username = $1", email)
+        if not user:
+            role = "operator" if email == "admin@example.com" else "viewer"
+            await conn.execute("INSERT INTO users (username, role) VALUES ($1, $2)", email, role)
+        else:
+            role = user["role"]
+    
+    token = jwt.encode(
+        {"sub": email, "role": role, "exp": datetime.now(timezone.utc) + timedelta(hours=8)},
+        JWT_SECRET,
+        algorithm="HS256"
+    )
+    
+    res = RedirectResponse(FRONTEND_URL)
+    res.set_cookie(key="auth_token", value=token, httponly=True, samesite="strict", secure=False, max_age=28800)
+    return res
 
 @app.get("/api/auth/me")
 async def auth_me(payload: dict = Depends(verify_token)):
@@ -197,7 +273,7 @@ class CommandRequest(BaseModel):
 @app.post("/api/command")
 async def send_command(cmd: CommandRequest, payload: dict = Depends(verify_token)):
     if payload.get("role") != "operator":
-        raise HTTPException(status_code=403, detail="Operator role required")
+        raise HTTPException(status_code=403)
     if mqtt_client:
         mqtt_client.publish("farm/zone1/command", json.dumps(cmd.model_dump()))
         return {"status": "dispatched"}

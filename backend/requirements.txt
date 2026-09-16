@@ -5,3 +5,5 @@ websockets
 asyncpg
 pydantic
 pyjwt
+bcrypt
+httpx
