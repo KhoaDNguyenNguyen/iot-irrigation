@@ -59,7 +59,6 @@ async def init_db():
             db_pool = await asyncpg.create_pool(DB_URL)
             async with db_pool.acquire() as conn:
                 await conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
-                
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         username VARCHAR(255) PRIMARY KEY,
@@ -67,13 +66,11 @@ async def init_db():
                         role VARCHAR(50) DEFAULT 'viewer'
                     );
                 """)
-                
                 await conn.execute("""
                     INSERT INTO users (username, password_hash, role) 
                     VALUES ($1, $2, 'operator'), ($3, $4, 'viewer')
                     ON CONFLICT (username) DO NOTHING;
                 """, 'operator', hash_password('admin123'), 'viewer', hash_password('view123'))
-
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS telemetry (
                         ts TIMESTAMPTZ NOT NULL,
@@ -122,19 +119,16 @@ async def lifespan(app: FastAPI):
     global event_loop, mqtt_client
     event_loop = asyncio.get_running_loop()
     await init_db()
-    
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     mqtt_client.username_pw_set("backend", "backend123")
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
-    
     for _ in range(10):
         try:
             mqtt_client.connect(MQTT_BROKER, 1883, 60)
             break
         except Exception:
             await asyncio.sleep(3)
-            
     mqtt_client.loop_start()
     yield
     mqtt_client.loop_stop()
@@ -168,20 +162,17 @@ class LoginData(BaseModel):
 async def login(data: LoginData, response: Response):
     if not db_pool:
         raise HTTPException(status_code=500)
-        
     async with db_pool.acquire() as conn:
         user = await conn.fetchrow("SELECT password_hash, role FROM users WHERE username = $1", data.username)
-        
     if not user or not user["password_hash"] or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401)
-    
     token = jwt.encode(
         {"sub": data.username, "role": user["role"], "exp": datetime.now(timezone.utc) + timedelta(hours=8)},
         JWT_SECRET,
         algorithm="HS256"
     )
     response.set_cookie(key="auth_token", value=token, httponly=True, samesite="strict", secure=False, max_age=28800)
-    return {"role": user["role"]}
+    return {"role": user["role"], "username": data.username}
 
 @app.get("/api/auth/google/login")
 async def google_login():
@@ -207,11 +198,9 @@ async def google_callback(code: str, response: Response):
             headers={"Authorization": f"Bearer {token_data.get('access_token')}"},
         )
         user_data = user_res.json()
-    
     email = user_data.get("email")
     if not email or not db_pool:
         raise HTTPException(status_code=400)
-
     async with db_pool.acquire() as conn:
         user = await conn.fetchrow("SELECT role FROM users WHERE username = $1", email)
         if not user:
@@ -219,20 +208,18 @@ async def google_callback(code: str, response: Response):
             await conn.execute("INSERT INTO users (username, role) VALUES ($1, $2)", email, role)
         else:
             role = user["role"]
-    
     token = jwt.encode(
         {"sub": email, "role": role, "exp": datetime.now(timezone.utc) + timedelta(hours=8)},
         JWT_SECRET,
         algorithm="HS256"
     )
-    
     res = RedirectResponse(FRONTEND_URL)
     res.set_cookie(key="auth_token", value=token, httponly=True, samesite="strict", secure=False, max_age=28800)
     return res
 
 @app.get("/api/auth/me")
 async def auth_me(payload: dict = Depends(verify_token)):
-    return {"role": payload.get("role")}
+    return {"role": payload.get("role"), "username": payload.get("sub")}
 
 @app.post("/api/auth/logout")
 async def logout(response: Response):
@@ -249,9 +236,17 @@ class TelemetryHistory(BaseModel):
 async def get_history(minutes: int = 60, payload: dict = Depends(verify_token)):
     if not db_pool:
         return []
-    query = """
+    
+    if minutes <= 60:
+        bucket = '1 minute'
+    elif minutes <= 1440:
+        bucket = '15 minutes'
+    else:
+        bucket = '1 hour'
+
+    query = f"""
         SELECT
-            time_bucket('1 minute', ts) AS bucket,
+            time_bucket('{bucket}', ts) AS bucket,
             ROUND(CAST(AVG(temperature) AS NUMERIC), 2) AS temp,
             ROUND(CAST(AVG(soil_moisture) AS NUMERIC), 2) AS moisture,
             ROUND(CAST(AVG(water_level) AS NUMERIC), 2) AS water
@@ -261,7 +256,7 @@ async def get_history(minutes: int = 60, payload: dict = Depends(verify_token)):
         ORDER BY bucket ASC;
     """
     async with db_pool.acquire() as conn:
-        records = await conn.fetch(query, f"{minutes} minutes")
+        records = await conn.fetch(query, timedelta(minutes=minutes))
         return [dict(r) for r in records]
 
 class CommandRequest(BaseModel):
@@ -290,7 +285,6 @@ async def websocket_endpoint(websocket: WebSocket):
     except:
         await websocket.close(code=1008)
         return
-
     await manager.connect(websocket)
     if latest_state:
         await websocket.send_text(json.dumps(latest_state))
