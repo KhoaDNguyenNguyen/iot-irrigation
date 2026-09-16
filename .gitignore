@@ -6,3 +6,6 @@ venv/
 .env
 dist/
 build/
+requirements.txt.bak
+
+flatten.py
